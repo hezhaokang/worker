@@ -1094,13 +1094,18 @@ ansible-playbook \
 # 修改内核参数
 vim /etc/sysctl.conf
 
-# 最大进程数
+# 文件系统监控
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
+
+# 最大 PID 数
 kernel.pid_max = 4194303
 
-# 减少 swap 使用
+# 内存与 swap 调整
 vm.swappiness = 10
+vm.max_map_count = 262144   # Elasticsearch / Ceph OSD 推荐
 
-# 文件句柄最大数
+# 文件句柄
 fs.file-max = 2097152
 
 # TCP 网络优化
@@ -1110,8 +1115,31 @@ net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_tw_recycle = 0
 net.ipv4.ip_local_port_range = 1024 65535
+
+# K8s & Ceph 网络桥接
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+
+# 文件系统 IO 优化
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+
+# 连接追踪
+net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+
+# 增加 arp 缓存和路由表容量
+net.ipv4.neigh.default.gc_thresh1 = 1024
+net.ipv4.neigh.default.gc_thresh2 = 2048
+net.ipv4.neigh.default.gc_thresh3 = 4096
+
+# 内核队列优化
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_mtu_probing = 1
 
 # 生效
 sysctl -p
@@ -1145,6 +1173,8 @@ logdir /var/log/chrony
 
 systemctl restart chrony
 systemctl enable chrony
+
+chronyc sources
 ```
 
 ```bash
@@ -1173,5 +1203,93 @@ kubectl create -f operator.yaml
 
 # 查看
 kubectl -n rook-ceph get pod
+```
+
+### 3、创建 Ceph 集群
+
+```bash
+# 修改 cluster.yaml
+vim cluster.yaml
+
+# 关键修改：
+storage:
+  useAllNodes: false
+  useAllDevices: false
+
+  nodes:
+    - name: "worker1"
+      devices:
+        - name: "sdb"
+        - name: "sdc"
+
+    - name: "worker2"
+      devices:
+        - name: "sdb"
+        - name: "sdc"
+
+    - name: "worker3"
+      devices:
+        - name: "sdb"
+        - name: "sdc"
+        
+
+
+# 创建集群
+kubectl create -f cluster.yaml
+
+# 查看状态
+kubectl -n rook-ceph get pod
+
+
+# 创建工具箱
+kubectl create -f toolbox.yaml
+
+#查看状态
+kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- bash
+bash-5.1$ ceph -s
+  cluster:
+    id:     ea50cf5f-874c-4782-9df6-e6566ff42e23
+    health: HEALTH_WARN
+            clock skew detected on mon.b
+ 
+  services:
+    mon: 3 daemons, quorum a,b,c (age 3m)
+    mgr: b(active, since 2m), standbys: a
+    osd: 6 osds: 6 up (since 97s), 6 in (since 2m)
+ 
+  data:
+    pools:   1 pools, 1 pgs
+    objects: 2 objects, 449 KiB
+    usage:   560 MiB used, 119 GiB / 120 GiB avail
+    pgs:     1 active+clean
+```
+
+
+
+### 4、创建 StorageClass
+
+```bash
+vim ceph-storageclass.yaml
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rook-ceph-block
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  clusterID: rook-ceph           # 对应 CephCluster 的 namespace/name
+  pool: replicapool              # 对应你创建的 CephBlockPool
+  imageFormat: "2"
+  imageFeatures: layering        # 推荐保留
+  csi.storage.k8s.io/fstype: ext4
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+
+kubectl apply -f ceph-storageclass.yaml
 ```
 
