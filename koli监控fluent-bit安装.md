@@ -1,7 +1,18 @@
-# 1、koli部署
+# 1、koli、promtail、grafana部署
 
-```
+```bash
+sudo apt-get install -y adduser libfontconfig1 musl
+wget https://dl.grafana.com/enterprise/release/grafana-enterprise_11.2.0_amd64.deb
+wget https://mirrors.aliyun.com/grafana/debian/pool/main/l/loki/loki_3.0.0_amd64.deb
+wget https://mirrors.aliyun.com/grafana/debian/pool/main/p/promtail/promtail_3.0.0_amd64.deb
 
+dpkg -i grafana-enterprise_13.0.2_26816849631_linux_amd64.deb 
+dpkg -i loki_3.0.0_amd64.deb
+dpkg -i promtail_3.0.0_amd64.deb
+
+systemctl status grafana-server.service
+systemctl status loki.service
+systemctl status promtail.service
 ```
 
 
@@ -124,89 +135,9 @@ subjects:
 
 
 
-```yaml
-# cat fluent-DS.yaml 
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fluent-bit
-  namespace: logging
-spec:
-  selector:
-    matchLabels:
-      app: fluent-bit
-
-  template:
-    metadata:
-      labels:
-        app: fluent-bit
-
-    spec:
-      serviceAccountName: fluent-bit
-
-      tolerations:
-        - key: node-role.kubernetes.io/control-plane
-          operator: Exists
-          effect: NoSchedule
-        - key: node-role.kubernetes.io/master
-          operator: Exists
-          effect: NoSchedule
-
-      containers:
-        - name: fluent-bit
-          image: docker.m.daocloud.io/fluent/fluent-bit:3.2.10
-
-          resources:
-            requests:
-              cpu: 100m
-              memory: 100Mi
-            limits:
-              memory: 200Mi
-
-          volumeMounts:
-            - name: varlog
-              mountPath: /var/log
-
-            - name: varlibcontainers
-              mountPath: /var/lib/docker/containers
-              readOnly: true
-
-            - name: config
-              mountPath: /fluent-bit/etc/
-
-            - name: storage
-              mountPath: /var/log/flb-storage
-
-      volumes:
-        - name: varlog
-          hostPath:
-            path: /var/log
-
-        - name: varlibcontainers
-          hostPath:
-            path: /var/lib/docker/containers
-
-        - name: config
-          configMap:
-            name: fluent-bit-config
-
-        - name: storage
-          hostPath:
-            path: /var/log/flb-storage
-
-```
 
 
-
-# 3、grafana部署
-
-```
-
-```
-
-
-
-# 4、 打开日志查询
+# 3、 打开日志查询
 
 左边：
 

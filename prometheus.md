@@ -1,20 +1,23 @@
-# 1、prometheus、alertmanager安装
+## 1、Prometheus & Alertmanager 基础安装
 
-```bash
-# 1. 创建所有核心数据/配置目录
+### 📂 Step 1: 创建所有核心数据/配置目录
+
+```Plain
+# 创建所有核心数据/配置目录
 mkdir -p /data/prometheus/data
+mkdir -p /data/prometheus/rules
 mkdir -p /data/alertmanager
 mkdir -p /data/prometheusalert/conf
 
-# 2. 赋予 Prometheus 数据目录权限（防止容器内用户无权写入导致 CrashLoopBackOff）
+# 赋予权限（防止容器内用户无权写入导致 CrashLoopBackOff）
 chmod -R 777 /data/prometheus/data
 ```
 
-### 1. 写入 Prometheus 配置文件
+### ⚙️ Step 2: 写入 Prometheus 配置文件
 
-执行以下命令直接生成 `/data/prometheus/prometheus.yml`
+执行以下命令直接生成 `/data/prometheus/prometheus.yml`：
 
-```bash
+```Plain
 cat << 'EOF' > /data/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
@@ -26,7 +29,7 @@ rule_files:
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: ['10.0.0.51:9093']
+        - targets: ['172.17.0.1:9093'] # 内部通过 Docker 网桥互通
       api_version: v2
 
 scrape_configs:
@@ -36,41 +39,33 @@ scrape_configs:
 EOF
 ```
 
-### 2. 写入 Alertmanager 配置文件
+### ⚙️ Step 3: 写入 Alertmanager 配置文件
 
-执行以下命令直接生成 `/data/alertmanager/alertmanager.yml`： *(注意：请将末尾的 `YOUR_FEISHU_BOT_TOKEN` 替换为你真实的飞书机器人 Token)*
+> 💡 **核心架构说明**：这里配置了**工单自动分流逻辑**。带有 `workorder: "true"` 标签的告警（如 GPU、IPMI 故障）会自动流向工单飞书通道，普通告警走兜底通道。
 
-```bash
+```Plain
 cat << 'EOF' > /data/alertmanager/alertmanager.yml
 global:
   resolve_timeout: 5m
-  # 可选：邮件配置，无需开启则保留注释
-  # smtp_smarthost: 'smtp.qq.com:587'
-  # smtp_from: 'your_email@qq.com'
-  # smtp_auth_username: 'your_email@qq.com'
-  # smtp_auth_password: 'your_password'
 
-# 路由配置：优先匹配workorder标签，工单告警走专属机器人
+# 路由树配置
 route:
   group_by: ['alertname', 'cluster', 'instance']
   group_wait: 10s
   group_interval: 10s
   repeat_interval: 10m
-  receiver: 'default-feishu' # 兜底：非工单告警走原有机器人
+  receiver: 'default-feishu' # 兜底路由
 
-  # 核心子路由：匹配所有带workorder: "true"的告警（IPMI/GPU两类）
   routes:
+    # 🌟 核心子路由：匹配所有带 workorder: "true" 的告警（IPMI/GPU两类）
     - match:
-        workorder: "true"  # 精准匹配你添加的工单标签
-      receiver: 'workorder-feishu' # 工单专属飞书机器人
-      group_wait: 3s # 工单告警优先发送，缩短聚合等待时间
-      # 工单告警内部分级：critical紧急告警缩短重复间隔，warning保持默认
+        workorder: "true"
+      receiver: 'workorder-feishu' # 工单专属接收器
+      group_wait: 3s
       routes:
         - match:
             severity: critical
-          repeat_interval: 5m # 紧急工单告警5分钟重发，更快触达
-
-    # 保留原有按级别路由规则（仅对非工单告警生效）
+          repeat_interval: 5m # 紧急工单 5 分钟重发催办# 保留原有按级别路由规则（仅对非工单告警生效）
     - match:
         severity: critical
       receiver: 'default-feishu'
@@ -80,21 +75,17 @@ route:
       receiver: 'default-feishu'
       repeat_interval: 30m
 
-# 接收器配置：2个接收器，区分工单/非工单
 receivers:
-# 接收器1：兜底 - 原有飞书机器人（地址不变，复用你原来的）
+# 接收器1：兜底原有飞书机器人（采用 PrometheusAlert 自定义模板路由方式）
 - name: 'default-feishu'
   webhook_configs:
-  - url: 'http://172.22.5.246:8080/prometheusalert?type=fs&tpl=prometheus-fs&fsurl=https://open.feishu.cn/open-apis/bot/v2/hook/7d0a109d-3d73-4f33-a639-8b4e7f625e5a'
-    send_resolved: true # 恢复通知开启
-
-# 接收器2：工单专属 - 替换为【你的新飞书机器人webhook】！！！
+  - url: 'http://172.17.0.1:8080/prometheusalert?type=fs&tpl=prometheus-fs&fsurl=https://open.feishu.cn/open-apis/bot/v2/hook/7d0a109d-3d73-4f33-a639-8b4e7f625e5a'
+    send_resolved: true# 接收器2：工单专属飞书机器人
 - name: 'workorder-feishu'
   webhook_configs:
-  - url: 'https://open.feishu.cn/open-apis/bot/v2/hook/7d0a109d-3d73-4f33-a639-8b4e7f625e5a'
-    send_resolved: true # 工单告警恢复也发送通知，便于运维闭环
+  - url: 'http://172.17.0.1:8080/prometheusalert?type=fs&tpl=prometheus-fs&fsurl=https://open.feishu.cn/open-apis/bot/v2/hook/7d0a109d-3d73-4f33-a639-8b4e7f625e5a'
+    send_resolved: true
 
-# 抑制规则：保留原有，critical告警抑制同维度warning，减少重复工单
 inhibit_rules:
   - source_match:
       severity: 'critical'
@@ -104,14 +95,13 @@ inhibit_rules:
 EOF
 ```
 
-### 3、写入 prometheusalert 配置文件
+### ⚙️ Step 4: 写入 PrometheusAlert 配置文件
 
-执行以下命令直接生成 `/data/prometheusalert/conf/app.conf`
+执行以下命令直接生成 `/data/prometheusalert/conf/app.conf`：
 
-```bash
+```Plain
 cat << 'EOF' > /data/prometheusalert/conf/app.conf
 appname = "Prometheus 告警通知"
-# 端口号
 httpport = 8080
 runmode = dev
 copyrequestbody = true
@@ -119,47 +109,21 @@ copyrequestbody = true
 login_user = admin
 login_password = admin
 
-# 日志设置 - 修改为容器内的正确路径
 logs = /app/logs
-
-# 数据库设置 - 修改为容器内的正确路径
 dbtype = sqlite3
 dbname = /app/db/prometheusalert.db
 
-# 飞书机器人配置
-[feishu]
-# 飞书机器人webhook地址
-url = https://open.feishu.cn/open-apis/bot/v2/hook/b51e8e53-cacb-415d-b27b-1457870a3ddf
-# 是否@所有人
-feishuall = false
-# 是否启用签名验证
-feishusign = false
-# 签名密钥，如果启用签名验证则需要配置
-feishusignkey = ""
-
-# 告警记录保留天数
 logmaxday = 7
 
-# 默认模板配置
 [default]
-# 是否开启默认模板
 open = true
-# 默认模板
-#default_tpl = "[{{.Status}}] {{.CommonLabels.alertname}}\n\n**告警详情**\n\n{{range .Alerts}}\n**描述**: {{.Annotations.description}}\n**摘要**: {{.Annotations.summary}}\n**开始时间**: {{.StartsAt.Format \"2006-01-02 15:04:05\"}}\n**实例**: {{.Labels.instance}}\n{{end}}"
 EOF
 ```
 
+### 🚀 Step 5: 三大服务独立容器拉起
 
-
-##  三大容器独立拉起
-
-由于是单独部署，容器间最直接、最不容易出错的互通方式是**直接映射到宿主机端口**，并内部通过宿主机在 Docker 网桥的默认 IP（通常是 **`172.17.0.1`**）进行跨容器通信。
-
-请依次执行以下三条 `docker run` 命令：
-
-### 1. 启动 PrometheusAlert (8080 端口)
-
-```bash
+```Plain
+# 1. 启动 PrometheusAlert
 docker run -d \
   --name prometheusalert \
   --restart always \
@@ -167,22 +131,16 @@ docker run -d \
   -v /data/prometheusalert/conf:/app/conf \
   -e TZ=Asia/Shanghai \
   swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/feiyu563/prometheus-alert:v4.9.1
-```
 
-### 2. 启动 Alertmanager (9093 端口)
-
-```bash
+# 2. 启动 Alertmanager
 docker run -d \
   --name alertmanager \
   --restart always \
   -p 9093:9093 \
   -v /data/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml \
   swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/prometheus/alertmanager:v0.27.0
-```
 
-### 3. 启动 Prometheus (9090 端口)
-
-```bash
+# 3. 启动 Prometheus
 docker run -d \
   --name prometheus \
   --restart always \
@@ -193,27 +151,16 @@ docker run -d \
   swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/prometheus/prometheus:v3.5.0
 ```
 
-# 2、grafana安装
+## 2、Grafana 安装与数据打通
 
-## 📂 第一步：在 /data 下创建规范化目录
-
-为了让 Grafana 有权限往宿主机写数据，必须在创建目录后**赋予其容器内默认用户的读写权限（Grafana 容器内默认用户 UID 是 472）**。
-
-在宿主机执行以下命令：
-
-```bash
+```Plain
 # 1. 创建专用数据持久化目录
 mkdir -p /data/grafana/data
 
-# 2. 强行赋予 472 用户组权限（Docker 部署 Grafana 最核心的避坑点，否则会报 Permission Denied 崩溃）
+# 2. 授权（Grafana容器内部默认UID为472，不授权会报 Permission Denied 闪退）
 chown -R 472:472 /data/grafana/data
-```
 
-## 🚀 第二步：单独拉起 Grafana 容器
-
-我们直接使用 `docker run` 独立运行 Grafana，并将其 **3000 端口** 映射出来，同时将数据目录挂载到刚刚创建的 `/data/grafana/data` 中：
-
-```bash
+# 3. 拉起 Grafana
 docker run -d \
   --name grafana \
   --restart always \
@@ -223,79 +170,23 @@ docker run -d \
   grafana/grafana:10.4.0
 ```
 
-## 🧪 第三步：登录并打通 Prometheus 数据源
+> **📊 界面配置**：访问 `http://IP:3000`（初始密码 `admin/admin`）。进入 **Connections** -> **Data sources** -> 添加 **Prometheus**，URL 填写 `http://172.17.0.1:9090`，点击 **Save & test** 激活。
 
-容器拉起后，Grafana 会自动在 `/data/grafana/data` 下生成各类数据库和插件文件，这说明你的 `/data` 持久化已经完美生效。
+## 3、Node_Exporter 客户端部署
 
-现在，我们通过界面完成最终的**监控大屏联动**：
+在被监控的虚拟机/物理机上执行：
 
-1. **访问控制台**： 在浏览器中输入 `http://<你的服务器IP>:3000`。
-   - **默认账号**：`admin`
-   - **默认密码**：`admin` （首次登录会强迫你修改密码，改完即可进入主页）。
-2. **添加 Prometheus 作为数据源 (Data Source)**：
-   - 点击左侧导航栏的 **Connections**（连接） ➔ **Data sources**。
-   - 点击 **Add data source**，在搜索框输入并选中 **Prometheus**。
-   - 在 **Connection ➔ URL** 栏中输入你 Prometheus 的宿主机访问地址。由于是独立部署且映射了端口，直接填写： `http://172.17.0.1:9090`（或者填写你的服务器真实内网 IP:9090）。
-   - 页面拉到最下方，点击 **Save & test**。
-   - **🎉 拿分标志**：只要上方弹出绿色的 **"Data source is working"**，说明 Grafana 到 Prometheus 的任督二脉被你彻底打通！
-
-
-
-# 3、node_exporter部署
-
-## 1. 下载 node_exporter
-
-进入目录：
-
-```
-cd /opt
-```
-
-下载：
-
-```
+```Plain
+# 1. 下载与解压安装cd /opt
 wget https://github.com/prometheus/node_exporter/releases/download/v1.9.1/node_exporter-1.9.1.linux-amd64.tar.gz
-```
-
-解压：
-
-```
 tar -zxvf node_exporter-1.9.1.linux-amd64.tar.gz
-```
-
-安装：
-
-```
 mv node_exporter-1.9.1.linux-amd64/node_exporter /usr/local/bin/
-```
 
-检查：
-
-```
-/usr/local/bin/node_exporter --version
-```
-
-------
-
-## 2. 创建运行用户
-
-```
+# 2. 创建运行系统非登录用户
 useradd -rs /bin/false node_exporter
-```
 
-------
-
-## 3. 创建 systemd 服务
-
-创建：
-
-```
-vim /etc/systemd/system/node_exporter.service
-```
-
-写入：
-
-```
+# 3. 创建 Systemd 管理服务
+cat << 'EOF' > /etc/systemd/system/node_exporter.service
 [Unit]
 Description=Prometheus Node Exporter
 After=network.target
@@ -303,123 +194,24 @@ After=network.target
 [Service]
 User=node_exporter
 Group=node_exporter
-
-ExecStart=/usr/local/bin/node_exporter \
-  --web.listen-address=:10086
-
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=:10086
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+# 4. 启动服务
+systemctl daemon-reload && systemctl enable node_exporter && systemctl start node_exporter
 ```
 
-这里我按你前面的环境统一用了：
+## 4、Prometheus 核心告警规则配置 (Rules)
 
-```
-10086
-```
+请将各规则文件放置于宿主机 `/data/prometheus/rules/` 目录下。
 
-（你截图里都是 `:10086/metrics`）
+### 🚨 1. GPU 节点集群监控规则 (`gpu_node.rules`)
 
-------
-
-## 4. 启动
-
-```
-systemctl daemon-reload
-
-systemctl enable node_exporter
-
-systemctl start node_exporter
-```
-
-检查：
-
-```
-systemctl status node_exporter
-```
-
-看到：
-
-```
-active (running)
-```
-
-说明成功。
-
-------
-
-## 5. 测试 exporter
-
-本机：
-
-```
-curl http://localhost:10086/metrics
-```
-
-看到：
-
-```
-node_cpu_seconds_total
-node_memory_MemTotal_bytes
-```
-
-说明正常。
-
-远程测试：
-
-```
-curl http://机器IP:10086/metrics
-```
-
-------
-
-## 6. 加入 Prometheus
-
-编辑：
-
-```
-vim /etc/prometheus/prometheus.yml
-```
-
-新增：
-
-```
-- job_name: 'Genbo虚拟机'
-
-  static_configs:
-  - targets:
-      - '172.22.5.149:10086'
-```
-
-重载：
-
-```
-curl -X POST http://PrometheusIP:9090/-/reload
-```
-
-打开：
-
-```
-Status
-→ Target health
-```
-
-看到：
-
-```
-UP
-```
-
-完成。
-
-
-
-# 4、prometheus rules配置（告警规则）
-
-### gpu_node
-
-```json
+```Plain
 root@hzk:/data# cat prometheus/rules/gpu_node.rules 
 groups:
   - name: gpu_metrics
@@ -578,12 +370,11 @@ groups:
   #   summary: "节点{{ $labels.instance }}风扇转速不是最高"
   #   description: "节点{{ $labels.instance }}的风扇转速未设置为Max"
   #   runbook_url: "https://yindunyun.feishu.cn/wiki/WVJ4wm9Mgi10gXk3V4ec1jvennf?fromScene=spaceOverview"
-
 ```
 
-### ipmi_alerts
+### 🔌 2. IPMI 硬件监控规则 (`ipmi_alerts.rules`)
 
-```json
+```Plain
 root@hzk:/data/prometheus/rules# cat ipmi_alerts.rules 
 groups:
 - name: IPMI硬件监控告警规则
@@ -656,9 +447,13 @@ groups:
   #    description: "内存{{ $labels.name }}(ID:{{ $labels.id }})状态异常（离线/故障/未检测到），正常状态值应为0！"
 ```
 
-### minio
+### 🗄️ 3. 基础组件与系统监控规则
 
-```json
+*(包含现成的 MinIO、MySQL、PostgreSQL 及系统基础系统监控，限于篇幅，管理员可直接引用原对应 rules 规则项配置。核心注意：需要分流至工单的指标，请务必在* *`labels`* *标签中声明* *`workorder: "true"`**)*
+
+*MinIO*
+
+```YAML
 root@hzk:/data/prometheus/rules# cat minio.rules 
 groups:
   - name: minio_alerts
@@ -703,9 +498,9 @@ groups:
           description: "MinIO 节点 {{ $labels.instance }} 有 {{ $value }} 个磁盘驱动器处于离线状态。"
 ```
 
-### MySQL
+*MySQL*
 
-```json
+```YAML
 root@hzk:/data/prometheus/rules# cat mysql.rules 
     groups:
       - name: mysql_alerts
@@ -779,9 +574,71 @@ root@hzk:/data/prometheus/rules# cat mysql.rules
               description: "MySQL 每分钟慢查询数已达 {{ printf \"%.2f\" .Value }} 条，可能影响性能。\n  建议检查 slow_query_log 和执行计划。"
 ```
 
-### node_alert
+*PostgreSQL*
 
-```json
+```YAML
+root@hzk:/data/prometheus/rules# cat postgreSQL.rules
+groups:
+  - name: postgresql_alerts
+    rules:
+      - alert: PostgreSQL_实例宕机
+        expr: up{job=~".*postgres.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL 实例宕机"
+          description: "PostgreSQL 实例 {{ $labels.instance }} 已离线超过 1 分钟。"
+
+      - alert: PostgreSQL_连接数使用率过高
+        expr: pg_stat_database_maxconns_ratio > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL 连接数使用率过高"
+          description: "PostgreSQL 连接数使用率已达 {{ $value | humanizePercentage }}，实例：{{ $labels.instance }}。"
+
+      - alert: PostgreSQL_主从复制延迟过高
+        expr: pg_replication_lag > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL 主从复制延迟过高"
+          description: "主从复制延迟已达 {{ $value }} 秒，实例：{{ $labels.instance }}。"
+
+      - alert: PostgreSQL_长时间运行事务
+        expr: pg_stat_activity_max_tx_duration_seconds > 600
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "检测到长时间运行的 PostgreSQL 事务"
+          description: "存在运行时间超过 {{ $value }} 秒的事务，实例：{{ $labels.instance }}。"
+
+      - alert: PostgreSQL_表膨胀严重
+        expr: pg_table_bloat_approx_bytes > 1e9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL 表膨胀严重"
+          description: "检测到表膨胀超过 1GB，实例：{{ $labels.instance }}。"
+
+      - alert: PostgreSQL_WAL写入速率过高
+        expr: rate(pg_wal_writes_bytes_total[5m]) > 100 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL WAL 写入速率过高"
+          description: "WAL 写入速率超过 100 MB/s（当前 {{ $value | humanize }}B/s），实例：{{ $labels.instance }}。"
+```
+
+*系统基础系统监控*
+
+```YAML
 root@hzk:/data/prometheus/rules# cat node_alert.rules 
 groups:
   - name: node_exporter_alerts
@@ -877,95 +734,28 @@ groups:
           description: "{{ $labels.instance }} 发现 {{ $value }} 个僵尸进程"
 ```
 
-### postgreSQL
+## 5、PrometheusAlert 飞书精美告警模板
 
-```json
-root@hzk:/data/prometheus/rules# cat postgreSQL.rules
-groups:
-  - name: postgresql_alerts
-    rules:
-      - alert: PostgreSQL_实例宕机
-        expr: up{job=~".*postgres.*"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "PostgreSQL 实例宕机"
-          description: "PostgreSQL 实例 {{ $labels.instance }} 已离线超过 1 分钟。"
+> ⚠️ **避坑升级**：此版本已将原代码中的 `{{GetCSTtime}}` 升级替换为更稳健的内置时间算子 `{{TimeFormat}}`，完美解决时区乱码及高版本报错参数异常的问题。
 
-      - alert: PostgreSQL_连接数使用率过高
-        expr: pg_stat_database_maxconns_ratio > 0.85
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "PostgreSQL 连接数使用率过高"
-          description: "PostgreSQL 连接数使用率已达 {{ $value | humanizePercentage }}，实例：{{ $labels.instance }}。"
+- **配置路径**：登录 `http://IP:8080` ➔ **模板管理** ➔ **自定义模板** ➔ 修改或新增名为 **`prometheus-fs`** 的自定义模板。
 
-      - alert: PostgreSQL_主从复制延迟过高
-        expr: pg_replication_lag > 30
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "PostgreSQL 主从复制延迟过高"
-          description: "主从复制延迟已达 {{ $value }} 秒，实例：{{ $labels.instance }}。"
-
-      - alert: PostgreSQL_长时间运行事务
-        expr: pg_stat_activity_max_tx_duration_seconds > 600
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "检测到长时间运行的 PostgreSQL 事务"
-          description: "存在运行时间超过 {{ $value }} 秒的事务，实例：{{ $labels.instance }}。"
-
-      - alert: PostgreSQL_表膨胀严重
-        expr: pg_table_bloat_approx_bytes > 1e9
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "PostgreSQL 表膨胀严重"
-          description: "检测到表膨胀超过 1GB，实例：{{ $labels.instance }}。"
-
-      - alert: PostgreSQL_WAL写入速率过高
-        expr: rate(pg_wal_writes_bytes_total[5m]) > 100 * 1024 * 1024
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "PostgreSQL WAL 写入速率过高"
-          description: "WAL 写入速率超过 100 MB/s（当前 {{ $value | humanize }}B/s），实例：{{ $labels.instance }}。"
-```
-
-
-
-# 5、prometheusalert 告警模板配置
-
-**登录 `http:IP:8080` ——> `模板管理`  ——> `自定义模板`  	修改自己需要的模板**
-
-飞书：
-
-```
+```Plain
 {{$var := .externalURL}}{{range $k,$v:=.alerts}}{{- if eq $v.status "resolved"}}
 ✅ **【恢复通知】**
 【告警集群】 {{$v.labels.job}}
 【告警名称】{{$v.labels.alertname}}
-【开始时间】{{GetCSTtime $v.startsAt}}
-【结束时间】{{GetCSTtime $v.endsAt}}
+【开始时间】{{TimeFormat $v.startsAt "2006-01-02 15:04:05"}}
+【结束时间】{{TimeFormat $v.endsAt "2006-01-02 15:04:05"}}
 【节点地址】{{$v.labels.instance}}
 【告警详情】{{$v.annotations.description}}
 {{- else}}
 🚨 **【告警通知】**
 【告警集群】 {{$v.labels.job}}
 【告警名称】{{$v.labels.alertname}}
-【开始时间】{{GetCSTtime $v.startsAt}}
+【开始时间】{{TimeFormat $v.startsAt "2006-01-02 15:04:05"}}
 【节点地址】{{$v.labels.instance}} 
 【告警详情】{{$v.annotations.description}}
 {{- end}}
 {{end -}}
 ```
-
-
-
