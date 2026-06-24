@@ -1293,3 +1293,26 @@ volumeBindingMode: Immediate
 kubectl apply -f ceph-storageclass.yaml
 ```
 
+### 5、创建PVC
+
+```bash
+vim ceph-pvc.yaml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-pvc
+
+spec:
+  accessModes:
+    - ReadWriteOnce
+
+  resources:
+    requests:
+      storage: 30Gi
+
+  storageClassName: rook-ceph-block
+  
+kubectl apply -f ceph-pvc.yaml
+```
+
